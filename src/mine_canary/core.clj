@@ -1,68 +1,63 @@
 (ns mine-canary.core
   (:import [backtype.storm StormSubmitter LocalCluster])
-  (:use [backtype.storm clojure config])
+  (:require [clj-kafka.consumer.zk :as kafka-consumer])
+  (:use [backtype.storm clojure config]
+        [clj-kafka.core])
   (:gen-class))
 
-(defspout sentence-spout ["sentence"]
+(defspout access-log-spout ["account" "ip-address"]
   [conf context collector]
-  (let [sentences ["a little brown dog"
-                   "the man petted the dog"
-                   "four score and seven years ago"
-                   "an apple a day keeps the doctor away"]]
+  (let [consumer (kafka-consumer/consumer {"zookeeper.connect" "localhost:2181"
+                                           "group.id" "mine-canary.consumer"
+                                           "auto.offset.reset" "smallest"
+                                           "auto.commit.enable" "false"})]
     (spout
-     (nextTuple []
-       (Thread/sleep 100)
-       (emit-spout! collector [(rand-nth sentences)])
-       )
+     (nextTuple
+      []
+      (doseq [msg (take 5 (kafka-consumer/messages consumer ["log-entry"]))]
+        (emit-spout! collector msg)))
      (ack [id]
         ;; You only need to define this method for reliable spouts
         ;; (such as one that reads off of a queue like Kestrel)
         ;; This is an unreliable spout, so it does nothing here
-        ))))
+        )
+     (close
+      []
+      (kafka-consumer/shutdown consumer)))))
 
-(defspout sentence-spout-parameterized ["word"] {:params [sentences] :prepare false}
-  [collector]
-  (Thread/sleep 500)
-  (emit-spout! collector [(rand-nth sentences)]))
+(defbolt split-log-entry ["account" "time" "ip-address" "success?"]
+  [tuple collector]
+  (let [entries (.split (.gfetString tuple 0) " ")]
+    (emit-bolt! collector entries))
+  (ack! collector tuple))
 
-(defbolt split-sentence ["word"] [tuple collector]
-  (let [words (.split (.getString tuple 0) " ")]
-    (doseq [w words]
-      (emit-bolt! collector [w] :anchor tuple))
-    (ack! collector tuple)
-    ))
-
-(defbolt word-count ["word" "count"] {:prepare true}
+(defbolt failures-in-given-period ["account" "time"] {:prepare true}
   [conf context collector]
   (let [counts (atom {})]
     (bolt
      (execute [tuple]
-       (let [word (.getString tuple 0)]
-         (swap! counts (partial merge-with +) {word 1})
-         (emit-bolt! collector [word (@counts word)] :anchor tuple)
+       (let [account (.getString tuple 0)]
+         (swap! counts (partial merge-with +) {account 1})
+         (emit-bolt! collector [account (@counts account)] :anchor tuple)
          (ack! collector tuple)
          )))))
 
 (defn mk-topology []
 
   (topology
-   {"1" (spout-spec sentence-spout)
-    "2" (spout-spec (sentence-spout-parameterized
-                     ["the cat jumped over the door"
-                      "greetings from a faraway land"])
-                     :p 2)}
-   {"3" (bolt-spec {"1" :shuffle "2" :shuffle}
-                   split-sentence
-                   :p 5)
-    "4" (bolt-spec {"3" ["word"]}
-                   word-count
-                   :p 6)}))
+   {"1" (spout-spec access-log-spout)}
+   {"2" (bolt-spec {"1" :shuffle}
+                   split-log-entry
+                   :p 3)
+    "3" (bolt-spec {"2" ["account"]}
+                   failures-in-given-period
+                   :p 5)}))
 
 (defn run-local! []
   (let [cluster (LocalCluster.)]
-    (.submitTopology cluster "word-count" {TOPOLOGY-DEBUG true} (mk-topology))
-    (Thread/sleep 10000)
-    (.shutdown cluster)
+    (.submitTopology cluster "unauthorized-access" {TOPOLOGY-DEBUG true} (mk-topology))
+    ;;(Thread/sleep 10000)
+    ;;(.shutdown cluster)
     ))
 
 (defn submit-topology! [name]
@@ -77,3 +72,6 @@
    (run-local!))
   ([name]
    (submit-topology! name)))
+
+
+
