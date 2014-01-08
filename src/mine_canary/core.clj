@@ -5,19 +5,23 @@
             [langohr.channel :as lch]
             [langohr.basic :as lb]
             [langohr.consumers :as lc]
+            [clojure.data.fressian :as fress]
             [clojure.string :as string])
   (:use [backtype.storm clojure config])
   (:gen-class))
 
 (defspout access-log-spout ["log-entry"]
   [conf context collector]
-  (let [conn (rmq/connect {:uri "amqp://172.17.0.9:5672"})
+  (let [conn (rmq/connect {:uri "amqp://localhost"})
         ch   (lch/open conn)]
+    (lq/declare ch "log-entry")
     (spout
      (nextTuple
       []
       (let [[metadata payload] (lb/get ch "log-entry")]
-        (emit-spout! collector [payload])))
+        (if payload
+          (emit-spout! collector [(fress/read payload)])
+          (Thread/sleep 1000))))
      (ack [id]
           ;; You only need to define this method for reliable spouts
           ;; (such as one that reads off of a queue like Kestrel)
@@ -32,16 +36,51 @@
     (emit-bolt! collector entries))
   (ack! collector tuple))
 
-(defbolt failures-in-given-period ["account" "time"] {:prepare true}
+(defn in-the-period? [tm-vec]
+  (and (= (count tm-vec) 5)
+       (< (- (first tm-vec) (last tm-vec)) 60000)))
+
+;;; 一定時間内に同一ユーザの大量のログイン失敗を検出する
+(defbolt failures-by-same-user ["account" "times"] {:prepare true}
   [conf context collector]
   (let [counts (atom {})]
     (bolt
      (execute [tuple]
-       (let [account (.getString tuple 0)]
-         (swap! counts (partial merge-with +) {account 1})
-         (emit-bolt! collector [account (@counts account)] :anchor tuple)
-         (ack! collector tuple)
-         )))))
+       (let [[account tm ip-address success?] (.getValues tuple)
+             tm (Long. tm)
+             success? (= success? "1")]
+         (when-not success?
+           (let [failures-tm (get @counts account [])]
+             (reset! counts
+                   (assoc @counts account (->> (conj failures-tm tm)
+                                               (sort >)
+                                               (take 5)
+                                               vec))))
+           (when (in-the-period? (@counts account))
+             (emit-bolt! collector [account (@counts account)] :anchor tuple)))
+         (ack! collector tuple))))))
+
+;;; 一定時間内に同一IPからの異なるユーザへの大量のログイン失敗を検出する
+(defbolt failures-by-same-ip ["account" "times"] {:prepare true}
+  [conf context collector]
+  (let [counts (atom {})]
+    (bolt
+     (execute [tuple]
+       (let [[account tm ip-address success?] (.getValues tuple)
+             tm (Long. tm)
+             success? (= success? "1")]
+         (when-not success?
+           (let [failures-tm (get @counts ip-address [])]
+             (reset! counts
+                   (assoc @counts ip-address (->> (conj failures-tm tm)
+                                               (sort >)
+                                               (take 5)
+                                               vec))))
+           (when (in-the-period? (@counts ip-address))
+             (emit-bolt! collector [ip-address (@counts ip-address)] :anchor tuple)))
+         (ack! collector tuple))))))
+
+;;; 同一ユーザが距離の離れた場所からログイン成功を検出する
 
 (defn mk-topology []
 
@@ -51,15 +90,18 @@
                    split-log-entry
                    :p 3)
     "3" (bolt-spec {"2" ["account"]}
-                   failures-in-given-period
-                   :p 5)}))
+                   failures-by-same-user
+                   :p 3)
+    "4" (bolt-spec {"2" ["ip-address"]}
+                   failures-by-same-ip
+                   :p 3)}))
 
 (defn run-local! []
   (let [cluster (LocalCluster.)]
     (.submitTopology cluster "unauthorized-access" {TOPOLOGY-DEBUG true} (mk-topology))
-    ;;(Thread/sleep 10000)
-    ;;(.shutdown cluster)
-    ))
+    (.addShutdownHook (Runtime/getRuntime)
+                      (Thread. (bound-fn []
+                                 (.shutdown cluster))))))
 
 (defn submit-topology! [name]
   (StormSubmitter/submitTopology
@@ -73,10 +115,4 @@
    (run-local!))
   ([name]
    (submit-topology! name)))
-
-
-
-
-
-
 
