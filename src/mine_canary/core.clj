@@ -1,34 +1,9 @@
 (ns mine-canary.core
   (:import [backtype.storm StormSubmitter LocalCluster])
-  (:require [langohr.queue :as lq]
-            [langohr.core :as rmq]
-            [langohr.channel :as lch]
-            [langohr.basic :as lb]
-            [langohr.consumers :as lc]
-            [clojure.data.fressian :as fress]
-            [clojure.string :as string])
+  (:require [clojure.string :as string]
+            [mine-canary.ulon-colon :as uc])
   (:use [backtype.storm clojure config])
   (:gen-class))
-
-(defspout access-log-spout ["log-entry"]
-  [conf context collector]
-  (let [conn (rmq/connect {:uri "amqp://localhost"})
-        ch   (lch/open conn)]
-    (lq/declare ch "log-entry")
-    (spout
-     (nextTuple
-      []
-      (let [[metadata payload] (lb/get ch "log-entry")]
-        (if payload
-          (emit-spout! collector [(fress/read payload)])
-          (Thread/sleep 1000))))
-     (ack [id]
-          ;; You only need to define this method for reliable spouts
-          ;; (such as one that reads off of a queue like Kestrel)
-          ;; This is an unreliable spout, so it does nothing here
-          )
-     (close []
-            (rmq/close ch)))))
 
 (defbolt split-log-entry ["account" "time" "ip-address" "success?"]
   [tuple collector]
@@ -85,7 +60,7 @@
 (defn mk-topology []
 
   (topology
-   {"1" (spout-spec access-log-spout)}
+   {"1" (spout-spec uc/access-log-spout)}
    {"2" (bolt-spec {"1" :shuffle}
                    split-log-entry
                    :p 3)
@@ -115,4 +90,5 @@
    (run-local!))
   ([name]
    (submit-topology! name)))
-
+
+

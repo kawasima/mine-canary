@@ -1,56 +1,68 @@
 (ns mine-canary.publisher
-  (:import [backtype.storm StormSubmitter LocalCluster])
-  (:require [langohr.queue :as lq]
-            [langohr.core :as rmq]
-            [langohr.channel :as lch]
-            [langohr.basic :as lb]
-            [langohr.consumers :as lc]
-            [clojure.string :as string]
-            [clojure.data.fressian :as fress]))
-(comment
-(let [conn (rmq/connect {:uri "amqp://localhost"})
-      ch   (lch/open conn)]
-  (lq/declare ch "test-queue")
-  (try
-    (if-let [[metadata msg] (lb/get ch "test-queue")]
-      (println (fress/read msg)))
-    (catch Exception e (.getMessage e))
-    (finally (rmq/close ch))))
+  (:import [org.apache.flume.event EventBuilder]
+           [java.sql Types])
+  (:use [flume-node.core :as flume :only [defsink defsource defagent]]
+        [ulon-colon.producer :only [start-producer produce]])
+  (:require [clojure.string :as string]
+            [clojure.java.io :as io]
+            [clojure.java.jdbc :as j]))
 
-(let [conn (rmq/connect {:uri "amqp://localhost"})
-      ch   (lch/open conn)]
-  (lq/declare ch "test-queue")
-  (lb/consume ch "test-queue"
-    (lc/create-default ch
-      :handle-delivery-fn (fn [ch metadata payload]
-                            (println (fress/read payload))))))
+(def oracle-db {:classname "oracle.jdbc.driver.OracleDriver"
+                :subprotocol "oracle"
+                :subname "thin:@localhost:1521/XE"
+                :user "scott"
+                :password "tiger"})
+(def oracle-conn (atom nil))
+(def watch-stmt  (atom nil))
 
-(let [conn (rmq/connect {:uri "amqp://localhost"})
-      ch   (lch/open conn)]
-  (lq/declare ch "test-queue")
-  (try
-    (lb/publish
-     ch "" "test-queue"
-     (->> [{:a {:b [1 2 3] :c "CC" :d #{4 5 6}}} "A"]
-          (fress/write)
-          (.array)))
-    (catch Exception e (.getMessage e))
-    (finally (rmq/close ch)))))
+(defsource oracle-insert-source
+  :start (fn []
+           (reset! oracle-conn (j/get-connection oracle-db))
+           (let [stmt (.prepareCall @oracle-conn "{call DBMS_ALERT.REGISTER(?)}")]
+             (doto stmt
+               (.setString 1 "NEW_LOGIN")
+               (.executeUpdate)
+               (.close)))
+           (let [stmt (.prepareCall @oracle-conn "{call DBMS_ALERT.WAITANY(?,?,?,?)}")]
+             (doto stmt
+               (.registerOutParameter 1 Types/VARCHAR)
+               (.registerOutParameter 2 Types/VARCHAR)
+               (.registerOutParameter 3 Types/INTEGER)
+               (.setInt 4 300))
+             (reset! watch-stmt stmt)))
 
-(let [conn (rmq/connect {:uri "amqp://localhost"})
-      ch   (lch/open conn)]
-  (try
-    (lb/publish
-     ch "" "log-entry"
-     (->> ["kawasima" (java.lang.System/currentTimeMillis) "192.168.0.1" 0]
-          (string/join " " )
-          (fress/write)
-          (.array)))
-    (catch Exception e (.getMessage e))
-    (finally (rmq/close ch))))
+  :process (fn []
+             (.commit @oracle-conn)
+             (.executeUpdate @watch-stmt)
+             (when (= 0 (.getInt @watch-stmt 3))
+               (let [msg (.getString @watch-stmt 2)]
+                 (println msg)
+                 (EventBuilder/withBody (.getBytes msg)))))
+  :stop (fn []
+           (let [stmt (.prepareCall @oracle-conn "{call DBMS_ALERT.REMOVE(?)}")]
+             (doto stmt
+               (.setString 1 "NEW_LOGIN")
+               (.executeUpdate)
+               (.close)))
+           (.close @watch-stmt)
+           (.close @oracle-conn)))
 
+(defsink ulon-colon-sink
+  :start  (fn [] (start-producer))
+  :process (fn [event]
+             (produce (String. (.getBody event)))))
 
+(defagent :a1
+  (flume/source :r1
+          :type "mine-canary.publisher/oracle-insert-source"
+          :channels :c1)
+  (flume/sink :k1
+        :type "mine-canary.publisher/ulon-colon-sink"
+        :channel :c1)
+  (flume/channel :c1
+           :type "memory"
+           :capacity 1000
+           :transactionCapacity 100))
 
-
-
-
+(defn -main []
+  (let [application (flume/make-app)]))
