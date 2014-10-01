@@ -1,9 +1,7 @@
 (ns mine-canary.core
   (:import [backtype.storm StormSubmitter LocalCluster])
   (:require [clojure.string :as string]
-            [ring.adapter.jetty :refer [run-jetty]]
-            [mine-canary.ulon-colon :as uc]
-            [mine-canary.ui :as ui])
+            [mine-canary.ulon-colon :as uc])
   (:use [backtype.storm clojure config])
   (:gen-class))
 
@@ -72,7 +70,7 @@
     "4" (bolt-spec {"2" ["ip-address"]}
                    failures-by-same-ip
                    :p 3)
-    "5" (bolt-spec {"3" []}
+    "5" (bolt-spec {"3" ["account" "times"] "4" ["account" "times"]}
                    uc/push-to-control-panel
                    :p 1)}))
 
@@ -92,8 +90,7 @@
 
 (defn -main
   ([]
-   (run-local!)
-   (run-jetty #'ui/app {:port 9090 :join? false})
+   (run-local!))
   ([name]
    (submit-topology! name)))
 

@@ -24,7 +24,7 @@
 (defbolt push-to-control-panel ["account" "times"] {:prepare true}
   [conf context collector]
   (let [counts (atom {})
-        procuder (start-producer 56293)]
+        procuder (start-producer :port 56293)]
     (bolt
      (execute [tuple]
        (let [[account times] (.getValues tuple)]
