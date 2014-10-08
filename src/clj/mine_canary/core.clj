@@ -12,6 +12,7 @@
   (ack! collector tuple))
 
 (defn in-the-period? [tm-vec]
+  (println "in-the-period?" (count tm-vec) (- (first tm-vec) (last tm-vec)))
   (and (= (count tm-vec) 5)
        (< (- (first tm-vec) (last tm-vec)) 60000)))
 
@@ -70,7 +71,7 @@
     "4" (bolt-spec {"2" ["ip-address"]}
                    failures-by-same-ip
                    :p 3)
-    "5" (bolt-spec {"3" ["account" "times"] "4" ["account" "times"]}
+    "5" (bolt-spec {"3" :shuffle "4" :shuffle}
                    uc/push-to-control-panel
                    :p 1)}))
 
